@@ -1,20 +1,20 @@
-import argparse
-import datetime
 import concurrent.futures
+import configparser
+import datetime
 import logging
-from urllib.parse import urljoin
-import numpy as np
 import os
-import pandas as pd
 import re
 import time
+from logging import config, getLogger
+from pathlib import Path
+from urllib.parse import urljoin
 
-from bs4 import BeautifulSoup
+import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 from robots import Robots
-
 
 MAX_RETRIES = 5
 DELAY = 1
@@ -23,16 +23,14 @@ MAX_WORKERS = None
 
 
 class SummoScraper(object):
-    def __init__(self, **kwargs):
-        for key, value in kwargs.items():
-            setattr(self, key, value)
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.logger.addHandler(logging.NullHandler())
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = True
 
-        self.logger = self.get_logger(self.log_dir)
-
-        self.items = []
-        self.timestamp = None
-
-        robots = Robots(self.url)
+    def can_fetch(self, url):
+        robots = Robots(url)
         if robots.can_fetch():
             self.delay = robots.crawl_delay()
             if self.delay is None:
@@ -62,21 +60,7 @@ class SummoScraper(object):
         soup = BeautifulSoup(response.content, "html.parser")
         return soup
 
-    def get_base_url(self, url):
-        base_url = re.sub("&page=[0-9]*", "", url)
-        return base_url
-
-    def get_page_no(self, url):
-        page = re.findall("&page=[0-9]*", url)
-        if len(page) != 0:
-            page_no = page[0].replace("&page=", "")
-            if page_no == "":
-                page_no = None
-        else:
-            page_no = None
-        return page_no
-
-    def get_max_page_no(self, url):
+    def fetch_max_page_no(self, url):
         soup = self._fetch_soup(url)
 
         pagination = soup.find("div", {"class": "pagination pagination_set-nav"})
@@ -90,217 +74,151 @@ class SummoScraper(object):
 
         return max_page_no
 
-    def get_rooms_data(self, url):
+    def get_base_url(self, url):
+        base_url = re.sub("&page=[0-9]*", "", url)
+        return base_url
+
+    def fetch_rooms_data(self, url):
         rooms = []
         soup = self._fetch_soup(url)
 
         items = soup.findAll("div", {"class": "cassetteitem"})
         for item in items:
             building = {}
-
-            building["名称"] = item.find("div", {"class": "cassetteitem_content-title"}).get_text().strip()
-            building["カテゴリー"] = item.find("div", {"class": "cassetteitem_content-label"}).get_text().strip()
-            building["アドレス"] = item.find("li", {"class": "cassetteitem_detail-col1"}).get_text().strip()
+            building["name"] = item.find("div", {"class": "cassetteitem_content-title"}).get_text().strip()
+            building["category"] = item.find("div", {"class": "cassetteitem_content-label"}).get_text().strip()
+            building["address"] = item.find("li", {"class": "cassetteitem_detail-col1"}).get_text().strip()
             accesses = item.find_all("div", {"class": "cassetteitem_detail-text"})
-            building["アクセス1"] = accesses[0].get_text().strip() if accesses[0] is not None else None
-            building["アクセス2"] = accesses[1].get_text().strip() if accesses[1] is not None else None
-            building["アクセス3"] = accesses[2].get_text().strip() if accesses[2] is not None else None
-            building["築年数"] = item.find("li", {"class": "cassetteitem_detail-col3"}).findAll("div")[0].get_text().strip()
-            building["階建"] = item.find("li", {"class": "cassetteitem_detail-col3"}).findAll("div")[1].get_text().strip()
+            building["accesses1"] = accesses[0].get_text().strip() if accesses[0] is not None else None
+            building["accesses2"] = accesses[1].get_text().strip() if accesses[1] is not None else None
+            building["accesses3"] = accesses[2].get_text().strip() if accesses[2] is not None else None
+            building["age"] = item.find("li", {"class": "cassetteitem_detail-col3"}).findAll("div")[0].get_text().strip()
+            building["story"] = item.find("li", {"class": "cassetteitem_detail-col3"}).findAll("div")[1].get_text().strip()
 
             tbodys = item.find("table", {"class": "cassetteitem_other"}).findAll("tbody")
-
             for tbody in tbodys:
                 room = building.copy()
-
-                room["階数"] = tbody.findAll("td")[2].get_text().strip()
-                room["家賃"] = tbody.find("span", {"class": "cassetteitem_price--rent"}).get_text().strip()
-                room["管理費"] = tbody.find("span", {"class": "cassetteitem_price--administration"}).get_text().strip()
-                room["敷金"] = tbody.find("span", {"class": "cassetteitem_price--deposit"}).get_text().strip()
-                room["礼金"] = tbody.find("span", {"class": "cassetteitem_price--gratuity"}).get_text().strip()
-                room["間取り"] = tbody.find("span", {"class": "cassetteitem_madori"}).get_text().strip()
-                room["面積"] = tbody.find("span", {"class": "cassetteitem_menseki"}).get_text().strip()
-                room["URL"] = urljoin("https://suumo.jp", tbody.find("a", {"class": "cassetteitem_other-linktext"}).get("href"))
-
+                room["floor"] = tbody.findAll("td")[2].get_text().strip()
+                room["rent"] = tbody.find("span", {"class": "cassetteitem_price--rent"}).get_text().strip()
+                room["administration"] = tbody.find("span", {"class": "cassetteitem_price--administration"}).get_text().strip()
+                room["deposit"] = tbody.find("span", {"class": "cassetteitem_price--deposit"}).get_text().strip()
+                room["gratuity"] = tbody.find("span", {"class": "cassetteitem_price--gratuity"}).get_text().strip()
+                room["layout"] = tbody.find("span", {"class": "cassetteitem_madori"}).get_text().strip()
+                room["size"] = tbody.find("span", {"class": "cassetteitem_menseki"}).get_text().strip()
+                room["url"] = urljoin("https://suumo.jp", tbody.find("a", {"class": "cassetteitem_other-linktext"}).get("href"))
                 rooms.append(room)
 
         rooms_df = pd.DataFrame(rooms)
         return rooms_df
 
-    def cleaning_rooms_data(self, rooms):
-        access1 = rooms["アクセス1"].str.split(" 歩", n=1, expand=True)
-        access1.columns = ["路線1/駅1", "徒歩1"]
-        access1["徒歩1"] = access1["徒歩1"].str.replace("分", "")
-        access1 = pd.concat([access1["路線1/駅1"].str.split("/", n=1, expand=True), access1["徒歩1"]], axis=1)
-        access1.columns = ["路線1", "駅1", "徒歩1"]
-        rooms = pd.concat([rooms, access1], axis=1)
-        rooms.drop(columns="アクセス1", inplace=True)
+    def cleaning_rooms_data(self, rooms_df):
+        regex_access_walk = re.compile(r"(.*線)/(.*駅) 歩(\d+)分")
+        rooms_df["line1"] = rooms_df["station1"] = rooms_df["minutes_on_foot1"] = rooms_df["accesses1"]
+        rooms_df.loc[~rooms_df["line1"].str.match(regex_access_walk), "line1"] = None
+        rooms_df.loc[~rooms_df["station1"].str.match(regex_access_walk), "station1"] = None
+        rooms_df.loc[~rooms_df["minutes_on_foot1"].str.match(regex_access_walk), "minutes_on_foot1"] = None
+        rooms_df["line1"] = rooms_df["line1"].replace(regex_access_walk, r"\1", regex=True)
+        rooms_df["station1"] = rooms_df["station1"].replace(regex_access_walk, r"\2", regex=True)
+        rooms_df["minutes_on_foot1"] = rooms_df["minutes_on_foot1"].replace(regex_access_walk, r"\3", regex=True)
+        rooms_df.drop(columns="accesses1", inplace=True)
 
-        access2 = rooms["アクセス2"].str.split(" 歩", n=1, expand=True)
-        access2.columns = ["路線2/駅2", "徒歩2"]
-        access2["徒歩2"] = access2["徒歩2"].str.replace("分", "")
-        access2 = pd.concat([access2["路線2/駅2"].str.split("/", n=1, expand=True), access2["徒歩2"]], axis=1)
-        access2.columns = ["路線2", "駅2", "徒歩2"]
-        rooms = pd.concat([rooms, access2], axis=1)
-        rooms.drop(columns="アクセス2", inplace=True)
+        rooms_df["line2"] = rooms_df["station2"] = rooms_df["minutes_on_foot2"] = rooms_df["accesses2"]
+        rooms_df.loc[~rooms_df["line2"].str.match(regex_access_walk), "line2"] = None
+        rooms_df.loc[~rooms_df["station2"].str.match(regex_access_walk), "station2"] = None
+        rooms_df.loc[~rooms_df["minutes_on_foot2"].str.match(regex_access_walk), "minutes_on_foot2"] = None
+        rooms_df["line2"] = rooms_df["line2"].replace(regex_access_walk, r"\1", regex=True)
+        rooms_df["station2"] = rooms_df["station2"].replace(regex_access_walk, r"\2", regex=True)
+        rooms_df["minutes_on_foot2"] = rooms_df["minutes_on_foot2"].replace(regex_access_walk, r"\3", regex=True)
+        rooms_df.drop(columns="accesses2", inplace=True)
 
-        access3 = rooms["アクセス3"].str.split(" 歩", n=1, expand=True)
-        access3.columns = ["路線3/駅3", "徒歩3"]
-        access3["徒歩3"] = access3["徒歩3"].str.replace("分", "")
-        access3 = pd.concat([access3["路線3/駅3"].str.split("/", n=1, expand=True), access3["徒歩3"]], axis=1)
-        access3.columns = ["路線3", "駅3", "徒歩3"]
-        rooms = pd.concat([rooms, access3], axis=1)
-        rooms.drop(columns="アクセス3", inplace=True)
+        rooms_df["line3"] = rooms_df["station3"] = rooms_df["minutes_on_foot3"] = rooms_df["accesses3"]
+        rooms_df.loc[~rooms_df["line3"].str.match(regex_access_walk), "line3"] = None
+        rooms_df.loc[~rooms_df["station3"].str.match(regex_access_walk), "station3"] = None
+        rooms_df.loc[~rooms_df["minutes_on_foot3"].str.match(regex_access_walk), "minutes_on_foot3"] = None
+        rooms_df["line3"] = rooms_df["line3"].replace(regex_access_walk, r"\1", regex=True)
+        rooms_df["station3"] = rooms_df["station3"].replace(regex_access_walk, r"\2", regex=True)
+        rooms_df["minutes_on_foot3"] = rooms_df["minutes_on_foot3"].replace(regex_access_walk, r"\3", regex=True)
+        rooms_df.drop(columns="accesses3", inplace=True)
 
-        rooms["築年数"] = rooms["築年数"].str.replace("新築", "0")
-        rooms["築年数"] = rooms["築年数"].str.replace("築", "")
-        rooms["築年数"] = rooms["築年数"].str.replace("年", "")
-        rooms["築年数"] = rooms["築年数"].str.replace("以上", "")
+        regex_age = re.compile(r"築(\d+)年(以上)*")
+        rooms_df["age"] = rooms_df["age"].replace("新築", "1")
+        rooms_df["age"] = rooms_df["age"].replace(regex_age, r"\1", regex=True)
+        rooms_df["age"] = pd.to_numeric(rooms_df["age"], errors="coerce")
 
-        rooms["階建"] = rooms["階建"].str.replace("地下[\d+]地上", "", regex=True)
-        rooms["階建"] = rooms["階建"].str.replace("平屋", "1")
-        rooms["階建"] = rooms["階建"].str.replace("階建", "")
+        regex_story = re.compile(r"(地下)*(\d*)(地上)*(\d+)階建")
+        rooms_df["story"] = rooms_df["story"].replace("平屋", "1")
+        rooms_df["story"] = rooms_df["story"].replace(regex_story, r"\4", regex=True)
+        rooms_df["story"] = pd.to_numeric(rooms_df["story"], errors="coerce")
 
-        floor = rooms["階数"].str.split("-", expand=True)
-        if len(floor.columns) == 1:
-            floor["1"] = np.nan
-        floor.columns = ["階1", "階2"]
-        floor["階1"] = floor["階1"].str.replace("階", "")
-        floor["階1"] = floor["階1"].str.replace("-", "0")
-        floor["階1"] = floor["階1"].str.replace("B", "-")
-        rooms = pd.concat([rooms, floor], axis=1)
-        rooms.drop(columns="階数", inplace=True)
+        regex_floor = re.compile(r"B*(\d+)*-*(\d+)階")
+        rooms_df["floor"] = rooms_df["floor"].replace(regex_floor, r"\2", regex=True)
+        rooms_df["floor"] = pd.to_numeric(rooms_df["floor"], errors="coerce")
 
-        rooms["家賃"] = rooms["家賃"].str.replace("万円", "")
-        rooms["家賃"] = rooms["家賃"].str.replace("-", "0")
+        regex_price = re.compile(r"(\d+)万*円")
+        rooms_df["rent"] = rooms_df["rent"].replace(regex_price, r"\1", regex=True)
+        rooms_df["rent"] = pd.to_numeric(rooms_df["rent"], errors="coerce") * 10000
 
-        rooms["管理費"] = rooms["管理費"].str.replace("円", "")
-        rooms["管理費"] = rooms["管理費"].str.replace("-", "0")
+        rooms_df["administration"] = rooms_df["administration"].replace(regex_price, r"\1", regex=True)
+        rooms_df["administration"] = rooms_df["administration"].str.replace("-", "0")
+        rooms_df["administration"] = pd.to_numeric(rooms_df["administration"], errors="coerce")
 
-        rooms["敷金"] = rooms["敷金"].str.replace("万円", "")
-        rooms["敷金"] = rooms["敷金"].str.replace("-", "0")
+        rooms_df["deposit"] = rooms_df["deposit"].replace(regex_price, r"\1", regex=True)
+        rooms_df["deposit"] = rooms_df["deposit"].str.replace("-", "0")
+        rooms_df["deposit"] = pd.to_numeric(rooms_df["deposit"], errors="coerce") * 10000
 
-        rooms["礼金"] = rooms["礼金"].str.replace("万円", "")
-        rooms["礼金"] = rooms["礼金"].str.replace("-", "0")
+        rooms_df["gratuity"] = rooms_df["gratuity"].replace(regex_price, r"\1", regex=True)
+        rooms_df["gratuity"] = rooms_df["gratuity"].str.replace("-", "0")
+        rooms_df["gratuity"] = pd.to_numeric(rooms_df["gratuity"], errors="coerce") * 10000
 
-        rooms["面積"] = rooms["面積"].str.replace("m2", "")
+        regex_size = re.compile(r"(\d+)m2")
+        rooms_df["size"] = rooms_df["size"].replace(regex_size, r"\1", regex=True)
+        rooms_df["size"] = pd.to_numeric(rooms_df["size"], errors="coerce")
 
-        rooms["築年数"] = pd.to_numeric(rooms["築年数"], errors="coerce")
-        rooms["階建"] = pd.to_numeric(rooms["階建"], errors="coerce")
-        rooms["階1"] = pd.to_numeric(rooms["階1"], errors="coerce")
-        rooms["階2"] = pd.to_numeric(rooms["階2"], errors="coerce")
-        rooms["家賃"] = pd.to_numeric(rooms["家賃"], errors="coerce")
-        rooms["管理費"] = pd.to_numeric(rooms["管理費"], errors="coerce")
-        rooms["敷金"] = pd.to_numeric(rooms["敷金"], errors="coerce")
-        rooms["礼金"] = pd.to_numeric(rooms["礼金"], errors="coerce")
-        rooms["築年数"] = pd.to_numeric(rooms["築年数"], errors="coerce")
-        rooms["面積"] = pd.to_numeric(rooms["面積"], errors="coerce")
+        return rooms_df
 
-        rooms["家賃"] = rooms["家賃"] * 10000
-        rooms["敷金"] = rooms["敷金"] * 10000
-        rooms["礼金"] = rooms["礼金"] * 10000
+    def parallel_process_func(self, url):
+        rooms_df = self.fetch_rooms_data(url)
+        rooms_df = self.cleaning_rooms_data(rooms_df)
+        return rooms_df
 
-        return rooms
-
-    def save_csv(self, df, filepath):
-        filepath = str(os.path.splitext(filepath)[0] + ".csv")
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        df.to_csv(filepath, index=False)
-
-    def template(self, item):
-        if self.timestamp is None:
-            self.timestamp = datetime.datetime.now()
-
-        template_value = {
-            "url": item["url"],
-            "page_no": str(item["page_no"]),
-            "datetime": self.timestamp.strftime("%Y%m%d%H%M%S"),
-            "date": self.timestamp.strftime("%Y%m%d"),
-            "year": self.timestamp.strftime("%Y"),
-            "month": self.timestamp.strftime("%m"),
-            "day": self.timestamp.strftime("%d"),
-            "h": self.timestamp.strftime("%H"),
-            "m": self.timestamp.strftime("%M"),
-            "s": self.timestamp.strftime("%S"),
-        }
-
-        return item["filepath"].format(**template_value)
-
-    def scrape_summo(self, item):
-        item["room"] = self.get_rooms_data(item["url"])
-        item["room"] = self.cleaning_rooms_data(item["room"])
-
-        if self.should_save_temp:
-            item["filepath"] = str(os.path.splitext(item["filepath"])[0] + "_{page_no}.csv")
-            item["filepath"] = self.template(item)
-            self.save_csv(item["room"], item["filepath"])
-
-        return item
-
-    def scrape(self):
-        save_filepath = os.path.join(self.save_dir, self.save_filename)
-
-        if self.should_turn_page:
-            self.max_page_no = self.get_max_page_no(self.url)
-            self.base_url = self.get_base_url(self.url)
-            for page_no in range(1, self.max_page_no + 1):
-                self.items.append({"url": self.base_url + "&page=" + str(page_no), "page_no": page_no, "filepath": save_filepath})
-        else:
-            self.items.append({"url": self.url, "page_no": self.get_page_no(self.url), "filepath": save_filepath})
+    def scrape(self, url, output_dir):
+        self.can_fetch(url)
+        max_page_no = self.fetch_max_page_no(url)
+        base_url = self.get_base_url(url)
+        scraped_urls = [base_url + "&page=" + str(page_no) for page_no in range(1, max_page_no + 1)]
 
         rooms = pd.DataFrame()
-        with tqdm(total=len(self.items)) as pbar:
+        with tqdm(total=len(scraped_urls)) as pbar:
             future_to_url = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                for item in self.items:
-                    future = executor.submit(self.scrape_summo, item)
-                    future_to_url[future] = item
+                for scraped_url in scraped_urls:
+                    future = executor.submit(self.parallel_process_func, scraped_url)
+                    future_to_url[future] = scraped_url
 
                 for future in concurrent.futures.as_completed(future_to_url):
-                    item = future_to_url[future]
+                    scraped_url = future_to_url[future]
                     if future.exception() is None:
-                        self.logger.info(f"Successed to scrape. URL: {item['url']}")
-                        rooms = pd.concat([rooms, future.result()["room"]])
+                        self.logger.info(f"Successed to scrape. URL: {scraped_url}")
+                        rooms = pd.concat([rooms, future.result()])
                     else:
-                        self.logger.error(f"Failed to scrape. URL: {item['url']}")
+                        self.logger.error(f"Failed to scrape. URL: {scraped_url}")
                         self.logger.error(f"Exception: {repr(future.exception())}")
                     pbar.update(1)
 
-        self.save_csv(rooms, self.template({"url": self.url, "page_no": None, "filepath": save_filepath}))
-
-    @staticmethod
-    def get_logger(log_dir="./"):
-        logger = logging.getLogger(__name__)
-        logger.setLevel(logging.INFO)
-        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s")
-
-        stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.ERROR)
-        stream_handler.setFormatter(fmt)
-        logger.addHandler(stream_handler)
-
-        log_path = os.path.join(log_dir, "summo_scraper.log")
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        file_handler = logging.FileHandler(log_path)
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(fmt)
-        logger.addHandler(file_handler)
-
-        return logger
+        output_dir = Path(output_dir)
+        os.makedirs(str(output_dir), exist_ok=True)
+        rooms.to_csv(output_dir / (datetime.datetime.now().strftime("%Y%m%d%H%M%S") + ".csv"), index=False)
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("url", help="SUMMO URL")
-    parser.add_argument("--save_dir", "-s", type=str, default="./", help="保存ディレクトリ")
-    parser.add_argument("--save_filename", "-f", type=str, default="{datetime}", help="保存ファイル名")
-    parser.add_argument("--log_dir", "-l", type=str, default="./", help="ログディレクトリ")
-    parser.add_argument("--should_turn_page", "-T", default=False, action="store_true", help="ページをめくるか")
-    parser.add_argument("--should_save_temp", "-S", default=False, action="store_true", help="中間ファイルを保存するか")
-    args = parser.parse_args()
+    config_ini = configparser.ConfigParser()
+    config_ini.read("conf.ini", encoding="utf-8")
 
-    scraper = SummoScraper(**vars(args))
-    scraper.scrape()
+    logger = config.fileConfig(config_ini.get("logger", "ini_path"))
+    logger = getLogger(__name__)
+
+    scraper = SummoScraper()
+    scraper.scrape(config_ini.get("scraper", "url"), config_ini.get("scraper", "output_dir"))
 
 
 if __name__ == "__main__":
